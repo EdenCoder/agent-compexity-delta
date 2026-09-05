@@ -65,6 +65,10 @@ test('CLI compares revision metadata with staged and unstaged files without chan
       result.newIntermediateConcepts.map((item: { name: string }) => item.name),
       ['wrapper'],
     );
+    assert.deepEqual(
+      result.newUnreferencedExports.map((item: { name: string }) => item.name),
+      ['extra'],
+    );
     assert.equal(git('status', '--porcelain=v1'), status);
     assert.equal(git('diff', '--cached'), index);
     assert.equal(git('diff'), working);

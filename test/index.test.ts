@@ -54,10 +54,80 @@ test('deleting branches and intermediary machinery', () => {
 });
 
 test('unchanged code produces a zero delta', () => {
-  const code = 'export const answer = () => 42;';
+  const code = 'export const answer = () => 42; export const x = answer() ?? 1;';
   const result = delta(code, code);
   assert.ok(Object.values(result.delta).every((value) => value === 0));
   assert.deepEqual(result.newIntermediateConcepts, []);
+  assert.deepEqual(result.newUnreferencedExports, []);
+  assert.deepEqual(result.newTestOnlyExports, []);
+  assert.deepEqual(result.newUnreachableGuards, []);
+});
+
+test('new exports nothing outside their file references are named', () => {
+  const result = compare(
+    analyze({ files: {} }),
+    analyze({
+      files: {
+        'a.ts':
+          'export function used() { return 1; }\nexport function unused() { return 2; }\nexport function local() { return 3; }\nexport const total = local();',
+        'b.ts': "import { used } from './a'; export const run = () => used();",
+      },
+    }),
+  );
+  assert.deepEqual(
+    result.newUnreferencedExports.map(({ name }) => name).sort(),
+    ['local', 'run', 'total', 'unused'],
+  );
+  assert.deepEqual(result.newTestOnlyExports, []);
+});
+
+test('new exports only tests reference are named separately, and test exports never', () => {
+  const result = compare(
+    analyze({ files: {} }),
+    analyze({
+      files: {
+        'a.ts': 'export function helper() { return 1; }\nexport function api() { return helper(); }',
+        'a.test.ts': "import { helper } from './a'; export const fixture = helper();",
+        'main.ts': "import { api } from './a'; api();",
+      },
+    }),
+  );
+  assert.deepEqual(
+    result.newTestOnlyExports.map(({ name, referrers }) => [name, referrers]),
+    [['helper', ['a.test.ts']]],
+  );
+  assert.deepEqual(result.newUnreferencedExports, []);
+});
+
+test('guards the types say cannot fire are named, nullable and truthy ones are not', () => {
+  const result = delta(
+    '',
+    `type Foo = { x: number };
+export function f(a: Foo, b: Foo | undefined, s: string, n?: number, r: Record<string, Foo> = {}) {
+  const p = a?.x;
+  const q = b?.x;
+  const t = n ?? 1;
+  if (!a) return 0;
+  if (!s) return 1;
+  if (a === undefined) return 2;
+  if (b == null) return 3;
+  const u = (b as Foo) ?? a;
+  const v = r.key ?? a;
+  return a && b ? p : (q ?? t) + (u.x ?? v.x);
+}`,
+  );
+  assert.deepEqual(
+    result.newUnreachableGuards.map(({ text, type }) => [text, type]),
+    [
+      ['a?.x', 'Foo'],
+      ['!a', 'Foo'],
+      ['a === undefined', 'Foo'],
+      ['(b as Foo) ?? a', 'Foo'],
+      ['r.key ?? a', 'Foo'],
+      ['a && b', 'Foo'],
+      ['u.x ?? v.x', 'number'],
+    ],
+  );
 });
 
 test('calls in local initializers belong to their enclosing function', () => {
@@ -277,6 +347,21 @@ test('a config extending a base outside the snapshot keeps its own options', () 
   assert.equal(result.measurements.callEdges, 1);
   assert.ok(
     result.graph.moduleDependencyEdges.includes('module:src/entry.ts -> module:src/leaf.ts'),
+  );
+});
+
+test('guards are inspected only in the changed files', () => {
+  const files = {
+    'a.ts': 'export function a(x: { n: number }) { return x?.n; }',
+    'b.ts': 'export function b(y: { n: number }) { return y?.n; }',
+  };
+  const result = compare(
+    analyze({ files: {} }),
+    analyze({ files }, new Set(['a.ts', 'b.ts']), new Set(['a.ts'])),
+  );
+  assert.deepEqual(
+    result.newUnreachableGuards.map(({ file }) => file),
+    ['a.ts'],
   );
 });
 

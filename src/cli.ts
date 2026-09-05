@@ -13,6 +13,9 @@ if (positional.length > 1 || args.includes('--help')) {
 }
 
 const base = positional[0] ?? 'HEAD';
+// A changed tsconfig, package manifest or declaration file can re-point
+// resolution for any file, so those changes measure the whole repository.
+const GLOBAL = /(^|\/)(?:tsconfig[^/]*|package)\.json$|\.d\.[cm]?ts$/;
 const root = git(['rev-parse', '--show-toplevel']).toString().trim();
 process.chdir(root);
 
@@ -20,9 +23,10 @@ try {
   const before = readRevision(base);
   const after = readWorkingTree();
   const changed = changedFiles(base);
-  const files =
-    changed && new Set([...affectedFiles(before, changed), ...affectedFiles(after, changed)]);
-  const result = compare(analyze(before, files), analyze(after, files));
+  const files = [...changed].some((path) => GLOBAL.test(path))
+    ? undefined
+    : new Set([...affectedFiles(before, changed), ...affectedFiles(after, changed)]);
+  const result = compare(analyze(before, files, changed), analyze(after, files, changed));
   console.log(json ? JSON.stringify(result, null, 2) : render(result));
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
@@ -58,15 +62,13 @@ function readRevision(revision: string): Snapshot {
   return { files };
 }
 
-// A changed tsconfig, package manifest or declaration file can re-point
-// resolution for any file, so those changes measure the whole repository.
-function changedFiles(revision: string): Set<string> | undefined {
-  const paths = [
-    ...git(['diff', '--name-only', '-z', revision, '--']).toString().split('\0'),
-    ...git(['ls-files', '--others', '--exclude-standard', '-z']).toString().split('\0'),
-  ].filter((path) => path && isSnapshotFile(path));
-  const global = /(^|\/)(?:tsconfig[^/]*|package)\.json$|\.d\.[cm]?ts$/;
-  return paths.some((path) => global.test(path)) ? undefined : new Set(paths);
+function changedFiles(revision: string): Set<string> {
+  return new Set(
+    [
+      ...git(['diff', '--name-only', '-z', revision, '--']).toString().split('\0'),
+      ...git(['ls-files', '--others', '--exclude-standard', '-z']).toString().split('\0'),
+    ].filter((path) => path && isSnapshotFile(path)),
+  );
 }
 
 function readWorkingTree(): Snapshot {

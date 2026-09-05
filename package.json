@@ -1,0 +1,42 @@
+{
+  "name": "complexity-delta",
+  "version": "0.0.1",
+  "type": "module",
+  "bin": {
+    "complexity-delta": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "test": "npm run build && tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ts-morph": "^28.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
+  },
+  "description": "Measure the conceptual machinery added or removed by a TypeScript code change.",
+  "author": "EdenCoder",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/EdenCoder/agent-compexity-delta.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "skills"
+  ]
+}

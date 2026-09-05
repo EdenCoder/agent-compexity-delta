@@ -46,6 +46,6 @@ The pass reviews measured increases, moves behavior to the objects that own the 
 
 The graph is static. Calls through dynamic dispatch or external packages are not inferred. Callback bodies are counted and own their calls; callback invocation is not inferred from framework behavior. Mutation detection covers direct writes, not effects hidden inside callees.
 
-Only TypeScript implementation files are measured. Declaration files and JSON configuration support resolution. Dependencies outside the snapshot are not loaded from the machine; external config packages must be present in the snapshot to resolve. Git submodules are separate repositories and should be analyzed separately.
+Only TypeScript implementation files are measured. Declaration files and JSON configuration support resolution. Dependencies outside the snapshot are not loaded from the machine; a tsconfig that extends a base outside the snapshot keeps its own options. Git submodules are separate repositories and should be analyzed separately.
 
 Interface implementation counts use explicit `implements` clauses. Export usage is measured within the snapshot, not among downstream consumers. Anonymous declarations use positional occurrence identities, so inserting or reordering them can change their identities. Path-inflation detection is not implemented.

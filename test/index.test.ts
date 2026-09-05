@@ -217,6 +217,23 @@ test('package configs and workspace export maps resolve to canonical source node
   assert.ok(result.graph.nodes.every((id) => !id.includes('node_modules')));
 });
 
+test('a config extending a base outside the snapshot keeps its own options', () => {
+  const result = analyze({
+    files: {
+      'tsconfig.json': JSON.stringify({
+        extends: 'framework/tsconfig.base',
+        compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } },
+      }),
+      'src/leaf.ts': 'export function leaf() { return 1; }',
+      'src/entry.ts': "import { leaf } from '@/leaf'; export function run() { return leaf(); }",
+    },
+  });
+  assert.equal(result.measurements.callEdges, 1);
+  assert.ok(
+    result.graph.moduleDependencyEdges.includes('module:src/entry.ts -> module:src/leaf.ts'),
+  );
+});
+
 test('NodeNext selects package import and require conditions', () => {
   const result = analyze({
     files: {

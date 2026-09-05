@@ -16,7 +16,7 @@ npx --no-install complexity-delta HEAD --json
 
 Run from that project's Git checkout. The base defaults to `HEAD`; pass another revision to review a change spanning multiple commits. JSON includes before/after/delta measurements and newly introduced intermediate candidates.
 
-Only the changed files and the files that import them, in either snapshot, are measured; the rest of the program is loaded for resolution, so calls into it count as edges without measuring the callee. `before` and `after` cover the measured files, and so do the graph percentages. A change to a tsconfig, package manifest or declaration file can re-point resolution for any file, so those changes measure the whole repository.
+Only the changed files and the files that import them, in either snapshot, are measured; the rest of the program is loaded for resolution, so calls into it count as edges without measuring the callee. `before` and `after` cover the measured files, and so do the graph percentages. A change to a tsconfig or declaration file can re-point resolution for any file, so those changes measure the whole repository; a package manifest does so only when a field the resolver reads changes (`name`, `type`, `exports`, `imports`, `main`, `module`, `types`), not when a dependency does.
 
 For a local clone:
 

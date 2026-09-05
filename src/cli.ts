@@ -13,9 +13,6 @@ if (positional.length > 1 || args.includes('--help')) {
 }
 
 const base = positional[0] ?? 'HEAD';
-// A changed tsconfig, package manifest or declaration file can re-point
-// resolution for any file, so those changes measure the whole repository.
-const GLOBAL = /(^|\/)(?:tsconfig[^/]*|package)\.json$|\.d\.[cm]?ts$/;
 const root = git(['rev-parse', '--show-toplevel']).toString().trim();
 process.chdir(root);
 
@@ -23,7 +20,7 @@ try {
   const before = readRevision(base);
   const after = readWorkingTree();
   const changed = changedFiles(base);
-  const files = [...changed].some((path) => GLOBAL.test(path))
+  const files = [...changed].some((path) => resolutionChanged(path, before, after))
     ? undefined
     : new Set([...affectedFiles(before, changed), ...affectedFiles(after, changed)]);
   const result = compare(analyze(before, files, changed), analyze(after, files, changed));
@@ -68,6 +65,28 @@ function changedFiles(revision: string): Set<string> {
       ...git(['diff', '--name-only', '-z', revision, '--']).toString().split('\0'),
       ...git(['ls-files', '--others', '--exclude-standard', '-z']).toString().split('\0'),
     ].filter((path) => path && isSnapshotFile(path)),
+  );
+}
+
+// A changed tsconfig or declaration file can re-point resolution for any
+// file, so it measures the whole repository. A package manifest does so only
+// through the fields the resolver reads; a dependency bump changes nothing
+// inside the snapshot.
+function resolutionChanged(path: string, before: Snapshot, after: Snapshot): boolean {
+  if (/(^|\/)tsconfig[^/]*\.json$|\.d\.[cm]?ts$/.test(path)) return true;
+  if (!/(^|\/)package\.json$/.test(path)) return false;
+  return resolutionFields(before.files[path]) !== resolutionFields(after.files[path]);
+}
+
+function resolutionFields(text: string | undefined): string | undefined {
+  let manifest: Record<string, unknown>;
+  try {
+    manifest = JSON.parse(text ?? '');
+  } catch {
+    return text;
+  }
+  return JSON.stringify(
+    ['name', 'type', 'exports', 'imports', 'main', 'module', 'types'].map((field) => manifest[field]),
   );
 }
 

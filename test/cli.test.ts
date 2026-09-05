@@ -78,6 +78,31 @@ test('CLI compares revision metadata with staged and unstaged files without chan
   }
 });
 
+test('a dependency bump keeps the measured subset; a changed export map does not', () => {
+  const { root, git, report } = repository({
+    'package.json': '{"name":"fixture","exports":{".":"./entry.ts"},"devDependencies":{}}',
+    'leaf.ts': 'export function leaf() { return 1; }',
+    'entry.ts': "import { leaf } from './leaf'; export function run() { return leaf(); }",
+    'other.ts': "import { leaf } from './leaf'; export function other() { return leaf(); }",
+  });
+  try {
+    writeFileSync(
+      join(root, 'package.json'),
+      '{"name":"fixture","exports":{".":"./entry.ts"},"devDependencies":{"x":"1.0.0"}}',
+    );
+    writeFileSync(join(root, 'entry.ts'), "import { leaf } from './leaf'; export function run() { return leaf() + 1; }");
+    assert.equal(report().before.sourceFiles, 1);
+    writeFileSync(
+      join(root, 'package.json'),
+      '{"name":"fixture","exports":{".":"./other.ts"},"devDependencies":{"x":"1.0.0"}}',
+    );
+    assert.equal(report().before.sourceFiles, 3);
+    git('status');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('CLI measures only the changed files and their importers when no config changed', () => {
   const { root, report } = repository({
     'leaf.ts': 'export function leaf() { return 1; }',

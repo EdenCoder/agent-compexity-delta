@@ -1,4 +1,4 @@
-import { Node, SyntaxKind, type Symbol as MorphSymbol, ts } from 'ts-morph';
+import { Node, type SourceFile, SyntaxKind, type Symbol as MorphSymbol, ts } from 'ts-morph';
 import { createProject } from './project.js';
 
 export interface Snapshot {
@@ -66,45 +66,85 @@ type Declaration = {
   file: string;
   node: Node;
   callable: boolean;
+  measured: boolean;
 };
 
-export function analyze(snapshot: Snapshot): Analysis {
+// A change can only alter the declarations, branches and edges of the changed
+// files and of the files that import them, directly or through re-exports.
+// Every other file contributes the same measurements to both snapshots.
+export function affectedFiles(snapshot: Snapshot, changed: Set<string>): Set<string> {
+  const project = createProject(snapshot.files);
+  const importers = new Map<string, Set<string>>();
+  for (const sourceFile of project.getSourceFiles()) {
+    if (sourceFile.isDeclarationFile()) continue;
+    for (const { file } of moduleSpecifiers(sourceFile)) {
+      if (!file) continue;
+      const target = snapshotPath(file);
+      importers.set(target, (importers.get(target) ?? new Set()).add(snapshotPath(sourceFile)));
+    }
+  }
+  const affected = new Set<string>();
+  const queue = [...changed];
+  while (queue.length) {
+    const path = queue.pop()!;
+    if (affected.has(path)) continue;
+    affected.add(path);
+    queue.push(...(importers.get(path) ?? []));
+  }
+  return affected;
+}
+
+export function analyze(snapshot: Snapshot, files?: Set<string>): Analysis {
   const project = createProject(snapshot.files);
   const paths = new Map(
     project
       .getSourceFiles()
       .filter((file) => !file.isDeclarationFile())
-      .map((file) => [file, file.getFilePath().slice('/repo/'.length)]),
+      .map((file) => [file, snapshotPath(file)]),
   );
 
-  const sourceFiles = [...paths.keys()];
+  const sourceFiles = [...paths.keys()].filter((file) => !files || files.has(paths.get(file)!));
   const declarations: Declaration[] = [];
+  const declarationById = new Map<string, Declaration>();
   const nodeIds = new Map<Node, string>();
   const usedIds = new Map<string, number>();
 
-  for (const sourceFile of sourceFiles) {
-    const file = paths.get(sourceFile)!;
-    for (const node of sourceFile.getDescendants()) {
-      const kind = declarationKind(node);
-      const name = declarationName(node);
-      if (!kind || !name) continue;
-      const baseId = `symbol:${file}:${kind}:${qualifiedName(node, name)}`;
-      const occurrence = usedIds.get(baseId) ?? 0;
-      usedIds.set(baseId, occurrence + 1);
-      const id = occurrence === 0 ? baseId : `${baseId}:${occurrence + 1}`;
-      const callable = isCallable(node);
-      declarations.push({ id, name, file, node, callable });
-      nodeIds.set(node, id);
-      if (Node.isArrowFunction(node) || Node.isFunctionExpression(node)) {
-        const parent = node.getParent();
-        if (Node.isVariableDeclaration(parent) || Node.isPropertyAssignment(parent)) {
-          nodeIds.set(parent, id);
-        }
+  const register = (node: Node, measured: boolean): string | undefined => {
+    const existing = nodeIds.get(node);
+    if (existing) return existing;
+    if (
+      (Node.isVariableDeclaration(node) || Node.isPropertyAssignment(node)) &&
+      isCallable(node.getInitializer())
+    ) {
+      return register(node.getInitializer()!, measured);
+    }
+    const kind = declarationKind(node);
+    const name = declarationName(node);
+    const file = paths.get(node.getSourceFile());
+    if (!kind || !name || !file) return undefined;
+    const baseId = `symbol:${file}:${kind}:${qualifiedName(node, name)}`;
+    const occurrence = usedIds.get(baseId) ?? 0;
+    usedIds.set(baseId, occurrence + 1);
+    const id = occurrence === 0 ? baseId : `${baseId}:${occurrence + 1}`;
+    const declaration = { id, name, file, node, callable: isCallable(node), measured };
+    declarations.push(declaration);
+    declarationById.set(id, declaration);
+    nodeIds.set(node, id);
+    if (Node.isArrowFunction(node) || Node.isFunctionExpression(node)) {
+      const parent = node.getParent();
+      if (Node.isVariableDeclaration(parent) || Node.isPropertyAssignment(parent)) {
+        nodeIds.set(parent, id);
       }
     }
+    return id;
+  };
+
+  for (const sourceFile of sourceFiles) {
+    for (const node of sourceFile.getDescendants()) register(node, true);
   }
 
-  const declarationById = new Map(declarations.map((item) => [item.id, item]));
+  // A declaration outside the measured files is registered when first
+  // referenced so the edge into it counts; its own fan-in is not measured.
   const declarationIdForSymbol = (symbol: MorphSymbol | undefined) => {
     let resolved = symbol;
     const seen = new Set<MorphSymbol>();
@@ -113,7 +153,7 @@ export function analyze(snapshot: Snapshot): Analysis {
       resolved = resolved.getAliasedSymbol();
     }
     for (const declaration of resolved?.getDeclarations() ?? []) {
-      const id = nodeIds.get(declaration);
+      const id = nodeIds.get(declaration) ?? register(declaration, false);
       if (id) return id;
     }
     return undefined;
@@ -134,15 +174,8 @@ export function analyze(snapshot: Snapshot): Analysis {
   for (const sourceFile of sourceFiles) {
     const from = `module:${paths.get(sourceFile)!}`;
     imports += sourceFile.getImportDeclarations().length;
-    for (const declaration of [
-      ...sourceFile.getImportDeclarations(),
-      ...sourceFile.getExportDeclarations(),
-    ]) {
-      if (!declaration.getModuleSpecifier()) continue;
-      const targetFile = declaration.getModuleSpecifierSourceFile();
-      const target = targetFile
-        ? `module:${paths.get(targetFile) ?? targetFile.getFilePath().slice('/repo/'.length)}`
-        : `package:${declaration.getModuleSpecifierValue()}`;
+    for (const { specifier, file: targetFile } of moduleSpecifiers(sourceFile)) {
+      const target = targetFile ? `module:${snapshotPath(targetFile)}` : `package:${specifier}`;
       moduleEdges.add(`${from} -> ${target}`);
       if (!targetFile || !paths.has(targetFile)) externalModules.add(target);
     }
@@ -182,7 +215,7 @@ export function analyze(snapshot: Snapshot): Analysis {
   const callers = edgeCounts(callEdges, false);
   const callees = edgeCounts(callEdges, true);
   const functions = declarations
-    .filter(({ callable }) => callable)
+    .filter(({ callable, measured }) => callable && measured)
     .map(({ id, name, file, node }) => ({
       id,
       name,
@@ -195,15 +228,14 @@ export function analyze(snapshot: Snapshot): Analysis {
 
   const implementations = new Map<string, Set<string>>();
   for (const declaration of declarations) {
-    if (!Node.isClassDeclaration(declaration.node)) continue;
+    if (!declaration.measured || !Node.isClassDeclaration(declaration.node)) continue;
     for (const heritage of declaration.node.getImplements()) {
       const interfaceId = declarationIdForSymbol(heritage.getExpression().getSymbol());
-      if (!interfaceId || !Node.isInterfaceDeclaration(declarationById.get(interfaceId)?.node)) {
-        continue;
-      }
-      const classes = implementations.get(interfaceId) ?? new Set<string>();
+      const target = interfaceId ? declarationById.get(interfaceId) : undefined;
+      if (!target?.measured || !Node.isInterfaceDeclaration(target.node)) continue;
+      const classes = implementations.get(target.id) ?? new Set<string>();
       classes.add(declaration.id);
-      implementations.set(interfaceId, classes);
+      implementations.set(target.id, classes);
     }
   }
 
@@ -352,6 +384,19 @@ export function render(result: ComplexityDelta): string {
     }
   }
   return output.join('\n');
+}
+
+function snapshotPath(file: SourceFile): string {
+  return file.getFilePath().slice('/repo/'.length);
+}
+
+function moduleSpecifiers(sourceFile: SourceFile) {
+  return [...sourceFile.getImportDeclarations(), ...sourceFile.getExportDeclarations()]
+    .filter((declaration) => declaration.getModuleSpecifier())
+    .map((declaration) => ({
+      specifier: declaration.getModuleSpecifierValue()!,
+      file: declaration.getModuleSpecifierSourceFile(),
+    }));
 }
 
 function declarationKind(node: Node): string | undefined {

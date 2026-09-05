@@ -2,7 +2,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { analyze, compare, render, type Snapshot } from './index.js';
+import { affectedFiles, analyze, compare, render, type Snapshot } from './index.js';
 
 const args = process.argv.slice(2);
 const json = args.includes('--json');
@@ -17,7 +17,12 @@ const root = git(['rev-parse', '--show-toplevel']).toString().trim();
 process.chdir(root);
 
 try {
-  const result = compare(analyze(readRevision(base)), analyze(readWorkingTree()));
+  const before = readRevision(base);
+  const after = readWorkingTree();
+  const changed = changedFiles(base);
+  const files =
+    changed && new Set([...affectedFiles(before, changed), ...affectedFiles(after, changed)]);
+  const result = compare(analyze(before, files), analyze(after, files));
   console.log(json ? JSON.stringify(result, null, 2) : render(result));
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
@@ -51,6 +56,17 @@ function readRevision(revision: string): Snapshot {
     offset = start + size + 1;
   }
   return { files };
+}
+
+// A changed tsconfig, package manifest or declaration file can re-point
+// resolution for any file, so those changes measure the whole repository.
+function changedFiles(revision: string): Set<string> | undefined {
+  const paths = [
+    ...git(['diff', '--name-only', '-z', revision, '--']).toString().split('\0'),
+    ...git(['ls-files', '--others', '--exclude-standard', '-z']).toString().split('\0'),
+  ].filter((path) => path && isSnapshotFile(path));
+  const global = /(^|\/)(?:tsconfig[^/]*|package)\.json$|\.d\.[cm]?ts$/;
+  return paths.some((path) => global.test(path)) ? undefined : new Set(paths);
 }
 
 function readWorkingTree(): Snapshot {

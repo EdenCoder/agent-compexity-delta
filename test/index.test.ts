@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { analyze, compare, type Snapshot } from '../src/index.js';
+import { affectedFiles, analyze, compare, type Snapshot } from '../src/index.js';
 
 const snapshot = (code: string): Snapshot => ({ files: { 'fixture.ts': code } });
 const delta = (before: string, after: string) =>
@@ -215,6 +215,52 @@ test('package configs and workspace export maps resolve to canonical source node
     ),
   );
   assert.ok(result.graph.nodes.every((id) => !id.includes('node_modules')));
+});
+
+const program = {
+  'leaf.ts': 'export function leaf() { return 1; }',
+  'mid.ts': "import { leaf } from './leaf'; export function mid() { return leaf(); }",
+  'barrel.ts': "export * from './mid';",
+  'top.ts': "import { mid } from './barrel'; export function top() { return mid(); }",
+  'other.ts': "import { leaf } from './leaf'; export function other() { return leaf(); }",
+};
+
+test('affected files are the changed files and their importers, not their dependencies', () => {
+  const affected = affectedFiles({ files: program }, new Set(['mid.ts']));
+  assert.deepEqual([...affected].sort(), ['barrel.ts', 'mid.ts', 'top.ts']);
+});
+
+test('measuring a subset still resolves calls into the rest of the program', () => {
+  const result = analyze({ files: program }, new Set(['barrel.ts', 'mid.ts', 'top.ts']));
+  assert.equal(result.measurements.sourceFiles, 3);
+  assert.ok(
+    result.graph.callEdges.includes(
+      'symbol:mid.ts:function:mid -> symbol:leaf.ts:function:leaf',
+    ),
+  );
+  assert.equal(result.functions.find(({ name }) => name === 'mid')?.fanIn, 1);
+  assert.equal(result.functions.some(({ name }) => name === 'leaf'), false);
+});
+
+test('a subset delta matches the whole-program delta', () => {
+  const before = { files: program };
+  const after = {
+    files: {
+      ...program,
+      'mid.ts':
+        "import { leaf } from './leaf'; function wrap() { return leaf(); } export function mid() { return wrap(); }",
+    },
+  };
+  const changed = new Set(['mid.ts']);
+  const files = new Set([...affectedFiles(before, changed), ...affectedFiles(after, changed)]);
+  const subset = compare(analyze(before, files), analyze(after, files));
+  const whole = compare(analyze(before), analyze(after));
+  assert.deepEqual(subset.delta, whole.delta);
+  assert.deepEqual(
+    subset.newIntermediateConcepts.map(({ name }) => name),
+    ['wrap'],
+  );
+  assert.equal(subset.before.sourceFiles, 3);
 });
 
 test('a config extending a base outside the snapshot keeps its own options', () => {

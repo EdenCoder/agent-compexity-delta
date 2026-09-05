@@ -16,6 +16,8 @@ npx --no-install complexity-delta HEAD --json
 
 Run from that project's Git checkout. The base defaults to `HEAD`; pass another revision to review a change spanning multiple commits. JSON includes before/after/delta measurements and newly introduced intermediate candidates.
 
+Only the changed files and the files that import them, in either snapshot, are measured; the rest of the program is loaded for resolution, so calls into it count as edges without measuring the callee. `before` and `after` cover the measured files, and so do the graph percentages. A change to a tsconfig, package manifest or declaration file can re-point resolution for any file, so those changes measure the whole repository.
+
 For a local clone:
 
 ```sh
@@ -46,6 +48,6 @@ The pass reviews measured increases, moves behavior to the objects that own the 
 
 The graph is static. Calls through dynamic dispatch or external packages are not inferred. Callback bodies are counted and own their calls; callback invocation is not inferred from framework behavior. Mutation detection covers direct writes, not effects hidden inside callees.
 
-Only TypeScript implementation files are measured. Declaration files and JSON configuration support resolution. Dependencies outside the snapshot are not loaded from the machine; external config packages must be present in the snapshot to resolve. Git submodules are separate repositories and should be analyzed separately.
+Only TypeScript implementation files are measured. Declaration files and JSON configuration support resolution. Dependencies outside the snapshot are not loaded from the machine; a tsconfig that extends a base outside the snapshot keeps its own options. Git submodules are separate repositories and should be analyzed separately.
 
-Interface implementation counts use explicit `implements` clauses. Export usage is measured within the snapshot, not among downstream consumers. Anonymous declarations use positional occurrence identities, so inserting or reordering them can change their identities. Path-inflation detection is not implemented.
+Interface implementation counts use explicit `implements` clauses. Fan-in, implementation counts and export usage are measured for declarations in the measured files, within the snapshot rather than among downstream consumers. Anonymous declarations use positional occurrence identities, so inserting or reordering them can change their identities. Path-inflation detection is not implemented.

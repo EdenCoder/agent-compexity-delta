@@ -11,7 +11,7 @@ Use this only after correctness has been established. From the repository being 
 complexity-delta HEAD
 ```
 
-Use the task’s base revision instead of `HEAD` when the change spans commits. Keep that base fixed for the pass. `--json` returns raw measurements and candidates. The report covers the whole repository; review only changes within the task’s scope. Never stash, reset, or clean unrelated work to obtain a narrower report.
+Use the task’s base revision instead of `HEAD` when the change spans commits. Keep that base fixed for the pass. `--json` returns raw measurements and candidates. The report covers the changed files and everything that imports them; review only changes within the task’s scope. Never stash, reset, or clean unrelated work to obtain a narrower report.
 
 Inspect every material increase in declarations, branches, representations, and graph edges. Pay particular attention to the reported intermediate candidates, single-caller functions, single-implementation interfaces, unreferenced exports, wrappers, translation layers, duplicate derivations, compatibility paths, and defensive branches.
 

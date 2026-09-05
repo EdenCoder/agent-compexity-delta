@@ -47,7 +47,9 @@ export function createProject(files: Record<string, string>): Project {
           if (config) {
             if (!configs.has(config)) {
               const parsed = ts.getParsedCommandLineOfConfigFile(config, {}, host)!;
-              const errors = parsed.errors.filter(({ code }) => code !== 18003);
+              // 6053: an `extends` target outside the snapshot, such as a base
+              // shipped in node_modules. The config's own options still parse.
+              const errors = parsed.errors.filter(({ code }) => code !== 18003 && code !== 6053);
               if (errors.length) {
                 throw new Error(
                   errors

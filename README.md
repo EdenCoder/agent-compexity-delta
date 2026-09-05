@@ -2,7 +2,7 @@
 
 Measure the conceptual machinery a TypeScript change adds or removes: declarations, branches, calls, dependencies, and symbol references. Compare a Git revision with the current working tree, including staged and untracked files.
 
-Correctness is necessary but not sufficient. This tool surfaces structural evidence for a subtraction pass, including new functions with one caller, one callee, and no direct mutations. These are candidates for review, not verdicts. There is no weighted complexity score.
+Correctness is necessary but not sufficient. This tool surfaces structural evidence for a subtraction pass: new functions with one caller, one callee, and no direct mutations; new exports that nothing, or only a test, references; and new guards the compiler says cannot fire. These are candidates for review, not verdicts. There is no weighted complexity score.
 
 ## Use
 
@@ -35,6 +35,8 @@ The build produces a plain Node.js CLI. You can invoke its absolute path from an
 - Exported names, import declarations, conditional branches, and distinct call, module dependency, and symbol reference edges.
 - Function fan-in/fan-out, single-caller functions, explicitly single-implementation interfaces, and exports without cross-file references.
 - Graph size changes and newly introduced intermediary candidates.
+- New exports that nothing outside their file references, and new exports only tests reference.
+- New guards on values whose type excludes null and undefined: `?.`, `??`, a comparison with null or undefined, and for truthiness tests (`!x`, `x && y`, `x || y`, `if (x)`, `x ? a : b`) a value whose type is an object. A cast or an index into a `Record` can make the type lie; then the type is the finding, not the guard. Guards are inspected in the changed files only, so a guard elsewhere that a type change makes unreachable is not reported.
 
 The analyzer uses each snapshot's configuration and package manifests for import resolution, including aliases, workspace packages, and conditional exports. Git access is read-only; it does not stash or modify the index or working tree.
 
@@ -50,4 +52,4 @@ The graph is static. Calls through dynamic dispatch or external packages are not
 
 Only TypeScript implementation files are measured. Declaration files and JSON configuration support resolution. Dependencies outside the snapshot are not loaded from the machine; a tsconfig that extends a base outside the snapshot keeps its own options. Git submodules are separate repositories and should be analyzed separately.
 
-Interface implementation counts use explicit `implements` clauses. Fan-in, implementation counts and export usage are measured for declarations in the measured files, within the snapshot rather than among downstream consumers. Anonymous declarations use positional occurrence identities, so inserting or reordering them can change their identities. Path-inflation detection is not implemented.
+Test files (`__tests__/`, `test/`, `tests/`, `e2e/`, `*.test.*`, `*.spec.*`) are exempt from the export and guard lists. Interface implementation counts use explicit `implements` clauses. Fan-in, implementation counts and export usage are measured for declarations in the measured files, within the snapshot rather than among downstream consumers. Anonymous declarations use positional occurrence identities, so inserting or reordering them can change their identities. Path-inflation detection is not implemented.

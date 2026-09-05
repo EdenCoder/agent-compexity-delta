@@ -1,4 +1,11 @@
-import { Node, type SourceFile, SyntaxKind, type Symbol as MorphSymbol, ts } from 'ts-morph';
+import {
+  Node,
+  type SourceFile,
+  SyntaxKind,
+  type Symbol as MorphSymbol,
+  ts,
+  type Type,
+} from 'ts-morph';
 import { createProject } from './project.js';
 
 export interface Snapshot {
@@ -38,9 +45,27 @@ export interface FunctionFact {
   stateful: boolean;
 }
 
+export interface ExportFact {
+  id: string;
+  name: string;
+  file: string;
+  line: number;
+  referrers: string[];
+}
+
+export interface GuardFact {
+  id: string;
+  file: string;
+  line: number;
+  text: string;
+  type: string;
+}
+
 export interface Analysis {
   measurements: Measurements;
   functions: FunctionFact[];
+  exports: ExportFact[];
+  guards: GuardFact[];
   graph: {
     nodes: string[];
     callEdges: string[];
@@ -58,6 +83,9 @@ export interface ComplexityDelta {
     edges: number | null;
   };
   newIntermediateConcepts: FunctionFact[];
+  newUnreferencedExports: ExportFact[];
+  newTestOnlyExports: ExportFact[];
+  newUnreachableGuards: GuardFact[];
 }
 
 type Declaration = {
@@ -94,7 +122,16 @@ export function affectedFiles(snapshot: Snapshot, changed: Set<string>): Set<str
   return affected;
 }
 
-export function analyze(snapshot: Snapshot, files?: Set<string>): Analysis {
+// Tests are exempt from the export and guard lists: a helper only tests share
+// and a `?.` inside an assertion are not production surface.
+export function isTestFile(path: string): boolean {
+  return /(^|\/)(?:__tests__|tests?|e2e)\/|\.(?:test|spec)\.[cm]?tsx?$/.test(path);
+}
+
+// `files` are measured; guards are inspected only in `changed`, because the
+// compiler has to type-check every function that holds one, and a guard in an
+// unchanged file cannot have been added by the change.
+export function analyze(snapshot: Snapshot, files?: Set<string>, changed?: Set<string>): Analysis {
   const project = createProject(snapshot.files);
   const paths = new Map(
     project
@@ -171,6 +208,7 @@ export function analyze(snapshot: Snapshot, files?: Set<string>): Analysis {
   let imports = 0;
   let exportedDeclarations = 0;
   const exportedIds = new Set<string>();
+  const exportFacts = new Map<string, ExportFact>();
   for (const sourceFile of sourceFiles) {
     const from = `module:${paths.get(sourceFile)!}`;
     imports += sourceFile.getImportDeclarations().length;
@@ -183,7 +221,18 @@ export function analyze(snapshot: Snapshot, files?: Set<string>): Analysis {
     exportedDeclarations += exports.length;
     for (const symbol of exports) {
       const id = declarationIdForSymbol(symbol);
-      if (id) exportedIds.add(id);
+      if (!id) continue;
+      exportedIds.add(id);
+      const declaration = declarationById.get(id)!;
+      if (!exportFacts.has(id) && !isTestFile(declaration.file)) {
+        exportFacts.set(id, {
+          id,
+          name: symbol.getName(),
+          file: declaration.file,
+          line: declaration.node.getStartLineNumber(),
+          referrers: [],
+        });
+      }
     }
   }
 
@@ -242,9 +291,37 @@ export function analyze(snapshot: Snapshot, files?: Set<string>): Analysis {
   const externallyReferenced = new Set<string>();
   for (const edge of referenceEdges) {
     const [from, to] = splitEdge(edge);
-    if (declarationFile(from, declarationById) !== declarationFile(to, declarationById)) {
-      externallyReferenced.add(to);
-    }
+    const referrer = declarationFile(from, declarationById);
+    if (referrer === declarationFile(to, declarationById)) continue;
+    externallyReferenced.add(to);
+    exportFacts.get(to)?.referrers.push(referrer);
+  }
+
+  // A guard the compiler says cannot fire: the value's type excludes null and
+  // undefined, or, for a truthiness test, is an object. A cast or an index
+  // into a Record can make the type lie; then the type is the finding.
+  const guards: GuardFact[] = [];
+  const guardIds = new Map<string, number>();
+  for (const sourceFile of sourceFiles) {
+    const file = paths.get(sourceFile)!;
+    if (isTestFile(file) || (changed && !changed.has(file))) continue;
+    sourceFile.forEachDescendant((node) => {
+      const guard = guardedValue(node);
+      if (!guard) return;
+      const type = guard.value.getType();
+      if (guard.truthiness ? !isObjectType(type) : mayBeNullish(type)) return;
+      const text = guard.node.getText().replace(/\s+/g, ' ');
+      const baseId = `guard:${file}:${text}`;
+      const occurrence = guardIds.get(baseId) ?? 0;
+      guardIds.set(baseId, occurrence + 1);
+      guards.push({
+        id: occurrence === 0 ? baseId : `${baseId}:${occurrence + 1}`,
+        file,
+        line: guard.node.getStartLineNumber(),
+        text,
+        type: type.getText(),
+      });
+    });
   }
 
   const graphNodes = new Set([
@@ -317,6 +394,11 @@ export function analyze(snapshot: Snapshot, files?: Set<string>): Analysis {
       unreferencedExports: [...exportedIds].filter((id) => !externallyReferenced.has(id)).length,
     },
     functions,
+    exports: [...exportFacts.values()].map((fact) => ({
+      ...fact,
+      referrers: [...new Set(fact.referrers)].sort(),
+    })),
+    guards,
     graph: {
       nodes: [...graphNodes].sort(),
       callEdges: [...callEdges].sort(),
@@ -332,6 +414,9 @@ export function compare(before: Analysis, after: Analysis): ComplexityDelta {
     delta[key] -= before.measurements[key];
   }
   const previousFunctions = new Set(before.functions.map(({ id }) => id));
+  const previousExports = new Set(before.exports.map(({ id }) => id));
+  const previousGuards = new Set(before.guards.map(({ id }) => id));
+  const newExports = after.exports.filter(({ id }) => !previousExports.has(id));
   return {
     before: before.measurements,
     after: after.measurements,
@@ -344,6 +429,11 @@ export function compare(before: Analysis, after: Analysis): ComplexityDelta {
       ({ id, fanIn, fanOut, stateful }) =>
         !previousFunctions.has(id) && fanIn === 1 && fanOut === 1 && !stateful,
     ),
+    newUnreferencedExports: newExports.filter(({ referrers }) => referrers.length === 0),
+    newTestOnlyExports: newExports.filter(
+      ({ referrers }) => referrers.length > 0 && referrers.every(isTestFile),
+    ),
+    newUnreachableGuards: after.guards.filter(({ id }) => !previousGuards.has(id)),
   };
 }
 
@@ -377,12 +467,30 @@ export function render(result: ComplexityDelta): string {
     `${'Graph nodes'.padEnd(27)} ${(result.graphChangePercent.nodes === null ? 'new' : `${signed(result.graphChangePercent.nodes)}%`).padStart(7)}`,
     `${'Graph edges'.padEnd(27)} ${(result.graphChangePercent.edges === null ? 'new' : `${signed(result.graphChangePercent.edges)}%`).padStart(7)}`,
   );
-  if (result.newIntermediateConcepts.length) {
-    output.push('', 'Suspicious intermediates:');
-    for (const candidate of result.newIntermediateConcepts) {
-      output.push(`  ${candidate.name} (${candidate.file}:${candidate.line})`);
-    }
-  }
+  const list = (title: string, rows: string[]) => {
+    if (rows.length) output.push('', title, ...rows.map((row) => `  ${row}`));
+  };
+  list(
+    'Suspicious intermediates:',
+    result.newIntermediateConcepts.map(({ name, file, line }) => `${name} (${file}:${line})`),
+  );
+  list(
+    'Exports nothing references:',
+    result.newUnreferencedExports.map(({ name, file, line }) => `${name} (${file}:${line})`),
+  );
+  list(
+    'Exports only tests reference:',
+    result.newTestOnlyExports.map(
+      ({ name, file, line, referrers }) => `${name} (${file}:${line}) <- ${referrers.join(', ')}`,
+    ),
+  );
+  list(
+    'Guards the types say cannot fire:',
+    result.newUnreachableGuards.map(
+      ({ text, file, line, type }) =>
+        `${text.length > 80 ? `${text.slice(0, 77)}...` : text} (${file}:${line}): ${type}`,
+    ),
+  );
   return output.join('\n');
 }
 
@@ -460,6 +568,82 @@ function splitEdge(edge: string): [string, string] {
 
 function declarationFile(id: string, declarations: Map<string, Declaration>): string {
   return declarations.get(id)?.file ?? id.replace(/^module:/, '');
+}
+
+const NULL_COMPARISONS = [
+  SyntaxKind.EqualsEqualsToken,
+  SyntaxKind.EqualsEqualsEqualsToken,
+  SyntaxKind.ExclamationEqualsToken,
+  SyntaxKind.ExclamationEqualsEqualsToken,
+];
+
+// The value a guard protects, and whether the guard tests truthiness (`!x`,
+// `x && y`, `if (x)`) or only null and undefined (`x?.`, `x ?? y`, `x == null`).
+function guardedValue(node: Node): { value: Node; truthiness: boolean; node: Node } | undefined {
+  if (
+    (Node.isPropertyAccessExpression(node) ||
+      Node.isElementAccessExpression(node) ||
+      Node.isCallExpression(node)) &&
+    node.hasQuestionDotToken()
+  ) {
+    return { value: node.getExpression(), truthiness: false, node };
+  }
+  if (Node.isBinaryExpression(node)) {
+    const operator = node.getOperatorToken().getKind();
+    if (operator === SyntaxKind.QuestionQuestionToken) {
+      return { value: node.getLeft(), truthiness: false, node };
+    }
+    if (operator === SyntaxKind.AmpersandAmpersandToken || operator === SyntaxKind.BarBarToken) {
+      return { value: node.getLeft(), truthiness: true, node };
+    }
+    if (NULL_COMPARISONS.includes(operator)) {
+      const value = isNullish(node.getRight())
+        ? node.getLeft()
+        : isNullish(node.getLeft())
+          ? node.getRight()
+          : undefined;
+      return value && { value, truthiness: false, node };
+    }
+  }
+  if (Node.isPrefixUnaryExpression(node) && node.getOperatorToken() === SyntaxKind.ExclamationToken) {
+    return { value: node.getOperand(), truthiness: true, node };
+  }
+  if (Node.isIfStatement(node) || Node.isConditionalExpression(node)) {
+    const condition = Node.isIfStatement(node) ? node.getExpression() : node.getCondition();
+    if (
+      Node.isIdentifier(condition) ||
+      Node.isPropertyAccessExpression(condition) ||
+      Node.isElementAccessExpression(condition)
+    ) {
+      return { value: condition, truthiness: true, node: condition };
+    }
+  }
+  return undefined;
+}
+
+function isNullish(node: Node): boolean {
+  return (
+    node.getKind() === SyntaxKind.NullKeyword ||
+    (Node.isIdentifier(node) && node.getText() === 'undefined')
+  );
+}
+
+function mayBeNullish(type: Type): boolean {
+  if (type.isUnion()) return type.getUnionTypes().some(mayBeNullish);
+  return (
+    type.isAny() ||
+    type.isUnknown() ||
+    type.isNull() ||
+    type.isUndefined() ||
+    type.isTypeParameter() ||
+    (type.getFlags() & ts.TypeFlags.Void) !== 0
+  );
+}
+
+function isObjectType(type: Type): boolean {
+  if (type.isUnion()) return type.getUnionTypes().every(isObjectType);
+  if (type.isIntersection()) return type.getIntersectionTypes().every(isObjectType);
+  return type.isObject();
 }
 
 function isCallable(node: Node | undefined): boolean {
